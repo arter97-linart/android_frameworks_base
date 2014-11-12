@@ -48,6 +48,7 @@ import com.android.internal.util.XmlUtils;
 import com.android.server.DeviceStorageMonitorService;
 import com.android.server.EventLogTags;
 import com.android.server.IntentResolver;
+import com.android.server.power.ShutdownThread;
 import com.android.server.Watchdog;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -322,7 +323,7 @@ public class PackageManagerService extends IPackageManager.Stub {
     final String mSdkCodename = "REL".equals(Build.VERSION.CODENAME)
             ? null : Build.VERSION.CODENAME;
 
-    final boolean mIsMultiThreaded;
+    boolean mIsMultiThreaded = false;
 
     final Context mContext;
     final boolean mFactoryTest;
@@ -1178,8 +1179,6 @@ public class PackageManagerService extends IPackageManager.Stub {
         if (mSdkVersion <= 0) {
             Slog.w(TAG, "**** ro.build.version.sdk not set!");
         }
-
-        mIsMultiThreaded = !"false".equals(SystemProperties.get("persist.sys.dalvik.multithread"));
 
         mContext = context;
         mFactoryTest = factoryTest;
@@ -4186,10 +4185,21 @@ public class PackageManagerService extends IPackageManager.Stub {
                             if (!isFirstBoot()) {
                                 i.getAndIncrement();
                                 try {
-                                    ActivityManagerNative.getDefault().showBootMessage(
-                                        mContext.getResources().getString(
-                                            com.android.internal.R.string.android_upgrading_apk,
-                                            i.get(), pkgsSize), true);
+                                    /* Always dexopt with multi-thread if more than 20 packages need to be dexopt'ed. */
+                                    if ((pkgsSize >= 20) && (sNThreads != 1))
+                                        mIsMultiThreaded = true;
+                                    /* Show message that the device will reboot soon if multi-threaded & final package is being dexopt'ed */
+                                    if (mIsMultiThreaded && (i.get() == pkgsSize)) {
+                                        ActivityManagerNative.getDefault().showBootMessage(
+                                            mContext.getResources().getText(
+                                                com.android.internal.R.string.reboot_progress),
+                                                false);
+                                    } else {
+                                        ActivityManagerNative.getDefault().showBootMessage(
+                                            mContext.getResources().getString(
+                                                com.android.internal.R.string.android_upgrading_apk,
+                                                i.get(), pkgsSize), true);
+                                    }
                                 } catch (RemoteException e) {
                                 }
                             }
@@ -4211,6 +4221,12 @@ public class PackageManagerService extends IPackageManager.Stub {
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
+        }
+
+        /* Force a reboot after multi-threaded dexopt to avoid data loss. Next reboot will perform dexopt single-threaded. */
+        if (mIsMultiThreaded) {
+            /* Directly call low-level reboot since system is not fully on yet */
+            ShutdownThread.rebootOrShutdown(true, null);
         }
     }
 
